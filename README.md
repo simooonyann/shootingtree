@@ -4,6 +4,10 @@ A small single-file browser game built with plain HTML, CSS, and JavaScript.
 
 The scene renders an animated tree on a full-screen canvas. Two launcher turrets sit near the bottom of the screen and fire projectiles toward the tree. When a projectile hits a branch, that branch and its child branches detach and fall, and the score increases.
 
+## Screenshot
+
+![Tree Knockdown Game screenshot](./game-screenshot.png)
+
 ## Features
 
 - Single-file project with no build step and no dependencies
@@ -50,17 +54,12 @@ http://localhost:8000/tree.html
 - Vanilla JavaScript
 - Inline CSS
 
-## Publishing To GitHub
+## Publishing Updates To GitHub
 
-This repository is already structured well for GitHub because it is minimal and self-contained. A reasonable next step is:
+To publish changes after editing the game or README:
 
 ```bash
-git init
 git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin <your-repo-url>
-git push -u origin main
+git commit -m "Update project"
+git push origin main
 ```
-
-If you want, I can also add a `.gitignore`, a license, or a small screenshot section before you push it.
