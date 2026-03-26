@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tree Knockdown Game</title>
+  <style>
+    :root {
+      --bg1: #08111f;
+      --bg2: #12243d;
+      --ground: #0c1b12;
+      --glow: rgba(180, 220, 255, 0.08);
+      --text: #dbe8ff;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: radial-gradient(circle at 50% 20%, #17345a 0%, var(--bg1) 40%, #04070d 100%);
+      color: var(--text);
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    .hud {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(8, 12, 20, 0.35);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 8px 30px rgba(0,0,0,0.25);
+      pointer-events: none;
+      max-width: min(360px, calc(100vw - 32px));
+    }
+
+    .hud h1 {
+      margin: 0 0 6px;
+      font-size: 15px;
+      font-weight: 650;
+      letter-spacing: 0.02em;
+    }
+
+    .hud p {
+      margin: 0 0 8px;
+      font-size: 12px;
+      line-height: 1.45;
+      opacity: 0.9;
+    }
+
+    .stats {
+      display: flex;
+      gap: 14px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div class="hud">
+    <h1>Tree Knockdown Game</h1>
+    <p>Click a launcher turret to fire a ball at the tree. Drag a launcher base left or right, or use the arrow pads and keyboard: <strong>A/D</strong> for the left launcher, <strong>J/L</strong> for the right launcher.</p>
+    <div class="stats">
+      <span id="score">Score: 0</span>
+      <span id="remaining">Branches: 0</span>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('scene');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const remainingEl = document.getElementById('remaining');
+
+    let dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    let width = 0;
+    let height = 0;
+    let branches = [];
+    let leaves = [];
+    let projectiles = [];
+    let machines = [];
+    let totalGrowthDuration = 0;
+    let startTime = 0;
+    let previousTime = 0;
+    let score = 0;
+    let dragState = null;
+
+    const config = {
+      maxDepth: 10,
+      shrinkMin: 0.7,
+      shrinkMax: 0.79,
+      baseAngle: Math.PI / 4.5,
+      angleJitter: 0.16,
+      trunkRatio: 0.19,
+      minBranchLength: 10,
+      growPerBranch: 90,
+      swayAmplitude: 0.06,
+      swaySpeed: 0.0011,
+      secondarySway: 0.022,
+      secondarySpeed: 0.0023,
+      projectileSpeed: 860,
+      projectileRadius: 8,
+      projectileGravity: 1150,
+      moveStep: 28,
+      machineWidth: 84,
+      machineHeight: 32,
+      machineY: 0.915,
+      machineMargin: 0.12,
+      fallingGravity: 1400,
+      hitPadding: 8,
+    };
+
+    function rand(min, max) {
+      return Math.random() * (max - min) + min;
+    }
+
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function easeOutCubic(t) {
+      return 1 - Math.pow(1 - t, 3);
+    }
+
+    function easeInOutSine(t) {
+      return -(Math.cos(Math.PI * t) - 1) / 2;
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function resize() {
+      dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      canvas.style.width = width + 'px';
+      canvas.style.height = height + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      generateTree();
+      initializeMachines();
+      startTime = performance.now();
+      previousTime = startTime;
+    }
+
+    function generateTree() {
+      branches = [];
+      leaves = [];
+      projectiles = [];
+      score = 0;
+
+      const trunkLength = height * config.trunkRatio;
+      const rootX = width * 0.5;
+      const rootY = height * 0.92;
+
+      buildBranch({
+        x: rootX,
+        y: rootY,
+        angle: -Math.PI / 2,
+        length: trunkLength,
+        depth: 0,
+        parentIndex: -1,
+        sideBias: 0,
+      });
+
+      totalGrowthDuration = branches.length * config.growPerBranch + 900;
+    }
+
+    function buildBranch(node) {
+      const { x, y, angle, length, depth, parentIndex, sideBias } = node;
+      if (length < config.minBranchLength || depth > config.maxDepth) return;
+
+      const nx = x + Math.cos(angle) * length;
+      const ny = y + Math.sin(angle) * length;
+
+      const branchIndex = branches.length;
+      const phase = rand(0, Math.PI * 2);
+      const swayFactor = depth === 0 ? 0.18 : Math.min(1, 0.25 + depth / (config.maxDepth + 1));
+      const thickness = Math.max(1, lerp(10, 1.1, depth / config.maxDepth));
+      const startDelay = branchIndex * config.growPerBranch;
+
+      branches.push({
+        x1: x,
+        y1: y,
+        x2: nx,
+        y2: ny,
+        baseAngle: angle,
+        length,
+        depth,
+        thickness,
+        phase,
+        swayFactor,
+        startDelay,
+        endDelay: startDelay + 700,
+        parentIndex,
+        children: [],
+        detached: false,
+        removed: false,
+        isFalling: false,
+      });
+
+      if (depth >= config.maxDepth - 2 || length < 18) {
+        leaves.push({ x: nx, y: ny, depth, phase: rand(0, Math.PI * 2), branchIndex });
+        return;
+      }
+
+      const shrinkL = rand(config.shrinkMin, config.shrinkMax);
+      const shrinkR = rand(config.shrinkMin, config.shrinkMax);
+      const asymmetry = rand(-0.06, 0.06);
+      const leftAngle = angle - config.baseAngle + rand(-config.angleJitter, config.angleJitter) + sideBias * 0.04 - asymmetry;
+      const rightAngle = angle + config.baseAngle + rand(-config.angleJitter, config.angleJitter) + sideBias * 0.04 + asymmetry;
+
+      const leftChildIndex = branches.length;
+      buildBranch({
+        x: nx,
+        y: ny,
+        angle: leftAngle,
+        length: length * shrinkL,
+        depth: depth + 1,
+        parentIndex: branchIndex,
+        sideBias: sideBias - 0.18,
+      });
+      if (branches[leftChildIndex]) branches[branchIndex].children.push(leftChildIndex);
+
+      const rightChildIndex = branches.length;
+      buildBranch({
+        x: nx,
+        y: ny,
+        angle: rightAngle,
+        length: length * shrinkR,
+        depth: depth + 1,
+        parentIndex: branchIndex,
+        sideBias: sideBias + 0.18,
+      });
+      if (branches[rightChildIndex]) branches[branchIndex].children.push(rightChildIndex);
+    }
+
+    function initializeMachines() {
+      const machineY = height * config.machineY;
+      const margin = width * config.machineMargin;
+      machines = [
+        createMachine('left', margin, machineY, '#e27d47', '#f5b06b'),
+        createMachine('right', width - margin, machineY, '#4d94ff', '#8fc0ff'),
+      ];
+      updateScoreboard();
+    }
+
+    function createMachine(side, x, y, bodyColor, accentColor) {
+      return {
+        side,
+        x,
+        y,
+        bodyColor,
+        accentColor,
+      };
+    }
+
+    function updateScoreboard() {
+      let remaining = 0;
+      for (const branch of branches) {
+        if (!branch.detached && !branch.removed) remaining++;
+      }
+      scoreEl.textContent = `Score: ${score}`;
+      remainingEl.textContent = `Branches: ${remaining}`;
+    }
+
+    function getWind(time) {
+      return (
+        Math.sin(time * config.swaySpeed) * config.swayAmplitude +
+        Math.sin(time * config.secondarySpeed + 1.7) * config.secondarySway
+      );
+    }
+
+    function getBranchRenderInfo(index, time, growthPhase, elapsed, cache) {
+      if (cache[index] !== undefined) return cache[index];
+
+      const branch = branches[index];
+      if (!branch || branch.detached || branch.removed) {
+        cache[index] = null;
+        return null;
+      }
+
+      const parentTip = branch.parentIndex >= 0
+        ? getBranchRenderInfo(branch.parentIndex, time, growthPhase, elapsed, cache)
+        : { tipX: branch.x1, tipY: branch.y1, angleOffset: 0 };
+      if (!parentTip) {
+        cache[index] = null;
+        return null;
+      }
+
+      const localWind = getWind(time + branch.phase * 1000) * branch.swayFactor * growthPhase;
+      const angleOffset = parentTip.angleOffset + localWind;
+      const angle = branch.baseAngle + angleOffset;
+      const tipX = parentTip.tipX + Math.cos(angle) * branch.length;
+      const tipY = parentTip.tipY + Math.sin(angle) * branch.length;
+      const localT = Math.max(0, Math.min(1, (elapsed - branch.startDelay) / (branch.endDelay - branch.startDelay)));
+      const easedGrow = easeOutCubic(localT);
+      const drawX = parentTip.tipX + Math.cos(angle) * branch.length * easedGrow;
+      const drawY = parentTip.tipY + Math.sin(angle) * branch.length * easedGrow;
+
+      cache[index] = {
+        startX: parentTip.tipX,
+        startY: parentTip.tipY,
+        drawX,
+        drawY,
+        tipX,
+        tipY,
+        angle,
+        angleOffset,
+        visible: localT > 0,
+      };
+      return cache[index];
+    }
+
+    function getMachineBounds(machine) {
+      const width = config.machineWidth;
+      const height = config.machineHeight;
+      const baseWidth = width + 28;
+      const baseHeight = 14;
+      const baseRect = {
+        x: machine.x - baseWidth / 2,
+        y: machine.y - baseHeight / 2 + 24,
+        width: baseWidth,
+        height: baseHeight,
+      };
+      const bodyRect = {
+        x: machine.x - width / 2,
+        y: machine.y - height / 2,
+        width,
+        height,
+      };
+      const arrowSize = 20;
+      return {
+        bodyRect,
+        baseRect,
+        leftArrow: { x: baseRect.x - 12, y: baseRect.y - 3, width: arrowSize, height: arrowSize },
+        rightArrow: { x: baseRect.x + baseRect.width - 8, y: baseRect.y - 3, width: arrowSize, height: arrowSize },
+      };
+    }
+
+    function getMachineBarrel(machine) {
+      const targetX = width * 0.5;
+      const targetY = height * 0.42;
+      const angle = Math.atan2(targetY - machine.y, targetX - machine.x);
+      const muzzleLength = 44;
+      return {
+        angle,
+        muzzleX: machine.x + Math.cos(angle) * muzzleLength,
+        muzzleY: machine.y + Math.sin(angle) * muzzleLength - 4,
+      };
+    }
+
+    function pointInRect(x, y, rect) {
+      return x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+    }
+
+    function moveMachine(machine, delta) {
+      const minX = width * 0.08;
+      const maxX = width * 0.92;
+      machine.x = clamp(machine.x + delta, minX, maxX);
+    }
+
+    function fireMachine(machine) {
+      const barrel = getMachineBarrel(machine);
+      projectiles.push({
+        x: barrel.muzzleX,
+        y: barrel.muzzleY,
+        vx: Math.cos(barrel.angle) * config.projectileSpeed,
+        vy: Math.sin(barrel.angle) * config.projectileSpeed,
+        radius: config.projectileRadius,
+      });
+    }
+
+    function drawBackground(time) {
+      const gradient = ctx.createLinearGradient(0, 0, 0, height);
+      gradient.addColorStop(0, '#102746');
+      gradient.addColorStop(0.45, '#0a1630');
+      gradient.addColorStop(1, '#03060b');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, width, height);
+
+      const moonX = width * 0.78;
+      const moonY = height * 0.16;
+      const moonR = Math.min(width, height) * 0.06;
+      const halo = ctx.createRadialGradient(moonX, moonY, moonR * 0.2, moonX, moonY, moonR * 3.5);
+      halo.addColorStop(0, 'rgba(255,255,230,0.16)');
+      halo.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(moonX, moonY, moonR * 3.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = 'rgba(255,255,235,0.9)';
+      ctx.beginPath();
+      ctx.arc(moonX, moonY, moonR, 0, Math.PI * 2);
+      ctx.fill();
+
+      for (let i = 0; i < 60; i++) {
+        const sx = (i * 137.5) % width;
+        const sy = (i * 83.1) % (height * 0.55);
+        const twinkle = 0.35 + 0.25 * Math.sin(time * 0.001 + i * 2.1);
+        ctx.fillStyle = `rgba(255,255,255,${twinkle})`;
+        ctx.fillRect(sx, sy, 1.5, 1.5);
+      }
+
+      const ground = ctx.createLinearGradient(0, height * 0.84, 0, height);
+      ground.addColorStop(0, 'rgba(12, 25, 17, 0)');
+      ground.addColorStop(0.25, 'rgba(10, 30, 18, 0.65)');
+      ground.addColorStop(1, 'rgba(6, 16, 10, 1)');
+      ctx.fillStyle = ground;
+      ctx.fillRect(0, height * 0.84, width, height * 0.16);
+    }
+
+    function drawTree(time) {
+      const elapsed = time - startTime;
+      const growthT = Math.min(1, elapsed / totalGrowthDuration);
+      const growthPhase = easeInOutSine(growthT);
+      const cache = [];
+
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      for (let i = 0; i < branches.length; i++) {
+        const branch = branches[i];
+        if (branch.detached || branch.removed) continue;
+        const info = getBranchRenderInfo(i, time, growthPhase, elapsed, cache);
+        if (!info || !info.visible) continue;
+
+        ctx.lineWidth = branch.thickness;
+        const bark = ctx.createLinearGradient(info.startX, info.startY, info.drawX, info.drawY);
+        bark.addColorStop(0, '#7b5739');
+        bark.addColorStop(1, '#c29257');
+        ctx.strokeStyle = bark;
+        ctx.beginPath();
+        ctx.moveTo(info.startX, info.startY);
+        ctx.lineTo(info.drawX, info.drawY);
+        ctx.stroke();
+      }
+
+      if (growthT > 0.72) {
+        const leafAlpha = Math.min(1, (growthT - 0.72) / 0.28);
+        for (let i = 0; i < leaves.length; i++) {
+          const leaf = leaves[i];
+          const parent = branches[leaf.branchIndex];
+          if (!parent || parent.detached || parent.removed) continue;
+          const parentInfo = getBranchRenderInfo(leaf.branchIndex, time, growthPhase, elapsed, cache);
+          if (!parentInfo) continue;
+          const pulse = 0.7 + 0.3 * Math.sin(time * 0.002 + leaf.phase);
+          const size = 2 + (config.maxDepth - leaf.depth) * 0.15 + pulse * 1.7;
+          const windX = Math.sin(time * 0.0015 + leaf.phase) * 3 * growthPhase;
+          const windY = Math.cos(time * 0.0011 + leaf.phase) * 1.5 * growthPhase;
+          const leafX = parentInfo.tipX + windX;
+          const leafY = parentInfo.tipY + windY;
+
+          ctx.fillStyle = `rgba(125, 210, 145, ${0.18 * leafAlpha})`;
+          ctx.beginPath();
+          ctx.arc(leafX, leafY, size * 2.2, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = `rgba(115, 205, 125, ${0.78 * leafAlpha})`;
+          ctx.beginPath();
+          ctx.arc(leafX, leafY, size, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      return { elapsed, growthPhase, cache };
+    }
+
+    function drawDetachedBranches() {
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      for (const branch of branches) {
+        if (!branch.isFalling || branch.removed) continue;
+        const ex = branch.fallX + Math.cos(branch.fallAngle) * branch.length;
+        const ey = branch.fallY + Math.sin(branch.fallAngle) * branch.length;
+
+        ctx.lineWidth = branch.thickness;
+        const bark = ctx.createLinearGradient(branch.fallX, branch.fallY, ex, ey);
+        bark.addColorStop(0, '#8b6443');
+        bark.addColorStop(1, '#d9a56d');
+        ctx.strokeStyle = bark;
+        ctx.beginPath();
+        ctx.moveTo(branch.fallX, branch.fallY);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+      }
+    }
+
+    function drawMachines() {
+      for (const machine of machines) {
+        const { bodyRect, baseRect, leftArrow, rightArrow } = getMachineBounds(machine);
+        const barrel = getMachineBarrel(machine);
+
+        ctx.fillStyle = 'rgba(4, 8, 13, 0.5)';
+        ctx.beginPath();
+        ctx.ellipse(machine.x, baseRect.y + baseRect.height + 10, 56, 10, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#2d2f35';
+        ctx.fillRect(baseRect.x, baseRect.y, baseRect.width, baseRect.height);
+
+        ctx.fillStyle = machine.accentColor;
+        ctx.fillRect(bodyRect.x, bodyRect.y, bodyRect.width, bodyRect.height);
+        ctx.fillStyle = machine.bodyColor;
+        ctx.fillRect(bodyRect.x + 8, bodyRect.y + 6, bodyRect.width - 16, bodyRect.height - 12);
+
+        ctx.strokeStyle = '#dbe8ff';
+        ctx.lineWidth = 8;
+        ctx.beginPath();
+        ctx.moveTo(machine.x, machine.y - 4);
+        ctx.lineTo(barrel.muzzleX, barrel.muzzleY);
+        ctx.stroke();
+
+        ctx.fillStyle = '#0c1422';
+        ctx.beginPath();
+        ctx.arc(machine.x, machine.y - 2, 10, 0, Math.PI * 2);
+        ctx.fill();
+
+        drawArrowPad(leftArrow, '<', machine.side === 'left' ? '#ffc79a' : '#c7ddff');
+        drawArrowPad(rightArrow, '>', machine.side === 'left' ? '#ffc79a' : '#c7ddff');
+      }
+    }
+
+    function drawArrowPad(rect, label, color) {
+      ctx.fillStyle = 'rgba(9, 15, 24, 0.7)';
+      ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+      ctx.fillStyle = color;
+      ctx.font = '13px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, rect.x + rect.width / 2, rect.y + rect.height / 2 + 1);
+    }
+
+    function drawProjectiles() {
+      for (const ball of projectiles) {
+        ctx.fillStyle = '#f8f0c8';
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = 'rgba(255, 245, 210, 0.5)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, ball.radius + 2, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+
+    function distancePointToSegment(px, py, x1, y1, x2, y2) {
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const lengthSq = dx * dx + dy * dy;
+      if (lengthSq === 0) return Math.hypot(px - x1, py - y1);
+      const t = clamp(((px - x1) * dx + (py - y1) * dy) / lengthSq, 0, 1);
+      const cx = x1 + dx * t;
+      const cy = y1 + dy * t;
+      return Math.hypot(px - cx, py - cy);
+    }
+
+    function detachBranchSubtree(rootIndex, time, treeState, impulseX, impulseY) {
+      const stack = [rootIndex];
+      while (stack.length) {
+        const index = stack.pop();
+        const branch = branches[index];
+        if (!branch || branch.detached || branch.removed) continue;
+
+        const info = getBranchRenderInfo(index, time, treeState.growthPhase, treeState.elapsed, treeState.cache);
+        if (!info) continue;
+
+        branch.detached = true;
+        branch.isFalling = true;
+        branch.fallX = info.startX;
+        branch.fallY = info.startY;
+        branch.fallAngle = info.angle;
+        branch.vx = impulseX * rand(0.16, 0.28) + rand(-20, 20);
+        branch.vy = impulseY * rand(0.1, 0.18) - rand(30, 70);
+        branch.angularVelocity = rand(-1.4, 1.4) + impulseX * 0.0015;
+
+        for (const childIndex of branch.children || []) {
+          stack.push(childIndex);
+        }
+      }
+
+      score += 1;
+      updateScoreboard();
+    }
+
+    function updateDetachedBranches(deltaSeconds) {
+      for (const branch of branches) {
+        if (!branch.isFalling || branch.removed) continue;
+
+        branch.vy += config.fallingGravity * deltaSeconds;
+        branch.fallX += branch.vx * deltaSeconds;
+        branch.fallY += branch.vy * deltaSeconds;
+        branch.fallAngle += branch.angularVelocity * deltaSeconds;
+
+        if (branch.fallY - branch.length > height + 120 || branch.fallX < -180 || branch.fallX > width + 180) {
+          branch.removed = true;
+          branch.isFalling = false;
+        }
+      }
+    }
+
+    function updateProjectiles(deltaSeconds, time, treeState) {
+      const nextProjectiles = [];
+
+      for (const ball of projectiles) {
+        ball.vy += config.projectileGravity * deltaSeconds;
+        ball.x += ball.vx * deltaSeconds;
+        ball.y += ball.vy * deltaSeconds;
+
+        let hit = false;
+        for (let i = branches.length - 1; i >= 0; i--) {
+          const branch = branches[i];
+          if (!branch || branch.detached || branch.removed) continue;
+          const info = getBranchRenderInfo(i, time, treeState.growthPhase, treeState.elapsed, treeState.cache);
+          if (!info || !info.visible) continue;
+
+          const distance = distancePointToSegment(ball.x, ball.y, info.startX, info.startY, info.drawX, info.drawY);
+          if (distance <= ball.radius + branch.thickness * 0.5 + config.hitPadding) {
+            detachBranchSubtree(i, time, treeState, ball.vx, ball.vy);
+            hit = true;
+            break;
+          }
+        }
+
+        if (hit) continue;
+        if (ball.x < -50 || ball.x > width + 50 || ball.y > height + 50) continue;
+        nextProjectiles.push(ball);
+      }
+
+      projectiles = nextProjectiles;
+    }
+
+    function getPointerPosition(event) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
+      };
+    }
+
+    function onPointerDown(event) {
+      const point = getPointerPosition(event);
+
+      for (const machine of machines) {
+        const { bodyRect, baseRect, leftArrow, rightArrow } = getMachineBounds(machine);
+        if (pointInRect(point.x, point.y, leftArrow)) {
+          moveMachine(machine, -config.moveStep);
+          return;
+        }
+        if (pointInRect(point.x, point.y, rightArrow)) {
+          moveMachine(machine, config.moveStep);
+          return;
+        }
+        if (pointInRect(point.x, point.y, bodyRect)) {
+          fireMachine(machine);
+          return;
+        }
+        if (pointInRect(point.x, point.y, baseRect)) {
+          dragState = { side: machine.side, offsetX: point.x - machine.x };
+          return;
+        }
+      }
+    }
+
+    function onPointerMove(event) {
+      if (!dragState) return;
+      const machine = machines.find((item) => item.side === dragState.side);
+      if (!machine) return;
+
+      const point = getPointerPosition(event);
+      machine.x = clamp(point.x - dragState.offsetX, width * 0.08, width * 0.92);
+    }
+
+    function onPointerUp() {
+      dragState = null;
+    }
+
+    function onKeyDown(event) {
+      if (event.key === 'a' || event.key === 'A') moveMachine(machines[0], -config.moveStep);
+      if (event.key === 'd' || event.key === 'D') moveMachine(machines[0], config.moveStep);
+      if (event.key === 'j' || event.key === 'J') moveMachine(machines[1], -config.moveStep);
+      if (event.key === 'l' || event.key === 'L') moveMachine(machines[1], config.moveStep);
+    }
+
+    function animate(time) {
+      const deltaSeconds = Math.min(0.033, (time - previousTime) / 1000 || 0);
+      previousTime = time;
+
+      drawBackground(time);
+      const treeState = drawTree(time);
+      updateProjectiles(deltaSeconds, time, treeState);
+      updateDetachedBranches(deltaSeconds);
+      drawDetachedBranches();
+      drawMachines();
+      drawProjectiles();
+      requestAnimationFrame(animate);
+    }
+
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('resize', resize, { passive: true });
+    resize();
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>
